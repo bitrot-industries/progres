@@ -48,12 +48,12 @@ pub const Page = struct {
             return error.UninitializedPage;
         }
 
-        _ = try HeaderView.new(bytes[0..HEADER_SIZE]);
+        try HeaderView.new(bytes[0..HEADER_SIZE]).validate();
 
         return .{ .bytes = bytes };
     }
 
-    pub fn header(self: *const Page) error{InvalidPage}!HeaderView {
+    pub fn header(self: *const Page) HeaderView {
         return HeaderView.new(self.bytes[0..24]);
     }
 };
@@ -67,8 +67,11 @@ const ItemId = packed struct(u32) {
 pub const HeaderView = struct {
     bytes: *const [24]u8,
 
-    fn new(bytes: *const [24]u8) error{InvalidPage}!HeaderView {
-        const self: HeaderView = .{ .bytes = bytes };
+    fn new(bytes: *const [24]u8) HeaderView {
+        return .{ .bytes = bytes };
+    }
+
+    fn validate(self: HeaderView) error{InvalidPage}!void {
         if (
         // Only defined page-state flags may be set.
         self.flags() & ~VALID_FLAG_BITS != 0 or
@@ -81,8 +84,6 @@ pub const HeaderView = struct {
             // Special space must start within the page, on its required boundary.
             self.special() > options.page_size or
             self.special() % SPECIAL_ALIGNMENT != 0) return error.InvalidPage;
-
-        return self;
     }
 
     /// Header fields
@@ -163,6 +164,7 @@ test "fromBytes validates initialized pages without copying" {
     _ = EmptyPage.new(&bytes);
     const page = try Page.fromBytes(&bytes);
     try std.testing.expect(page.bytes == &bytes);
+    try std.testing.expectEqual(@as(u16, HEADER_SIZE), page.header().lower());
 
     std.mem.writeInt(u16, bytes[10..12], 0x8000, .little);
     try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
@@ -184,7 +186,7 @@ test "fromBytes validates initialized pages without copying" {
 test "new empty page formats its buffer in place" {
     var bytes: [options.page_size]u8 = @splat(0xaa);
     const page = EmptyPage.new(&bytes);
-    const header = try HeaderView.new(page.bytes[0..24]);
+    const header = HeaderView.new(page.bytes[0..24]);
 
     try std.testing.expectEqual(&bytes, page.bytes);
     try std.testing.expectEqual(@as(u16, 24), header.lower());
