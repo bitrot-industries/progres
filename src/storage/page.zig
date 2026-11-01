@@ -22,38 +22,68 @@ pub const EmptyPage = struct {
     /// Format a buffer as an empty page with no special space.
     pub fn new(bytes: *[options.page_size]u8) EmptyPage {
         @memset(bytes, 0);
-        initializeHeader(bytes[0..24]);
+        initializeHeader(bytes[0..24], options.page_size);
         return .{ .bytes = bytes };
     }
 
-    fn initializeHeader(bytes: *[24]u8) void {
-        // lower: free space starts immediately after the 24-byte header.
-        std.mem.writeInt(u16, bytes[12..14], 24, .little);
-        // upper: free space ends at the end of the page; there are no items.
-        std.mem.writeInt(u16, bytes[14..16], options.page_size, .little);
-        // special: no special space is reserved, so it starts at the page end.
-        std.mem.writeInt(u16, bytes[16..18], options.page_size, .little);
-        // Store the page size and layout version together in one field.
-        std.mem.writeInt(u16, bytes[18..20], options.page_size | PAGE_LAYOUT_VERSION, .little);
+    /// Format an empty page with aligned special space at the end.
+    pub fn newWithSpecialSize(
+        bytes: *[options.page_size]u8,
+        special_size: u16,
+    ) !EmptyPage {
+        const aligned_size = std.mem.alignForward(
+            usize,
+            special_size,
+            SPECIAL_ALIGNMENT,
+        );
+
+        // Check that space remains after the header and special area.
+        if (aligned_size >= options.page_size - HEADER_SIZE) {
+            return error.SpecialSpaceTooLarge;
+        }
+
+        const special_start = options.page_size - aligned_size;
+
+        @memset(bytes, 0);
+        initializeHeader(bytes[0..HEADER_SIZE], @intCast(special_start));
+
+        return .{ .bytes = bytes };
+    }
+
+    /// `special_start` is an offset from the beginning of the page.
+    fn initializeHeader(bytes: *[HEADER_SIZE]u8, special_start: u16) void {
+        // The empty line-pointer array ends immediately after the header.
+        std.mem.writeInt(u16, bytes[12..14], HEADER_SIZE, .little);
+
+        // There are no items yet, so both boundaries start at special space.
+        std.mem.writeInt(u16, bytes[14..16], special_start, .little);
+        std.mem.writeInt(u16, bytes[16..18], special_start, .little);
+
+        // Store the page size and layout version together.
+        std.mem.writeInt(
+            u16,
+            bytes[18..20],
+            options.page_size | PAGE_LAYOUT_VERSION,
+            .little,
+        );
     }
 };
 
-pub const Page = struct {
+pub const PageView = struct {
     bytes: *const [options.page_size]u8,
 
-    /// Validate an initialized page header and borrow the original buffer.
-    /// This does not validate checksums, line pointers, or item contents.
-    pub fn fromBytes(bytes: *const [options.page_size]u8) error{ UninitializedPage, InvalidPage }!Page {
+    pub fn fromBytes(bytes: *const [options.page_size]u8, block_number: u32) error{ UninitializedPage, InvalidPage, ChecksumMismatch }!PageView {
         if (std.mem.allEqual(u8, bytes, 0)) {
             return error.UninitializedPage;
         }
 
-        try HeaderView.new(bytes[0..HEADER_SIZE]).validate();
-
+        const header_view = HeaderView.new(bytes[0..HEADER_SIZE]);
+        try header_view.validate();
+        if (header_view.checksum() != checksum.calculate(bytes, block_number)) return error.ChecksumMismatch;
         return .{ .bytes = bytes };
     }
 
-    pub fn header(self: *const Page) HeaderView {
+    pub fn header(self: *const PageView) HeaderView {
         return HeaderView.new(self.bytes[0..24]);
     }
 };
@@ -160,27 +190,28 @@ test "header view reads each field from page bytes" {
 
 test "fromBytes validates initialized pages without copying" {
     var bytes: [options.page_size]u8 = @splat(0);
-    try std.testing.expectError(error.UninitializedPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.UninitializedPage, PageView.fromBytes(&bytes, 0));
     _ = EmptyPage.new(&bytes);
-    const page = try Page.fromBytes(&bytes);
+    std.mem.writeInt(u16, bytes[8..10], checksum.calculate(&bytes, 0), .little);
+    const page = try PageView.fromBytes(&bytes, 0);
     try std.testing.expect(page.bytes == &bytes);
     try std.testing.expectEqual(@as(u16, HEADER_SIZE), page.header().lower());
 
     std.mem.writeInt(u16, bytes[10..12], 0x8000, .little);
-    try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
     std.mem.writeInt(u16, bytes[10..12], 0, .little);
     std.mem.writeInt(u16, bytes[12..14], 23, .little);
-    try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
     std.mem.writeInt(u16, bytes[12..14], options.page_size, .little);
     std.mem.writeInt(u16, bytes[14..16], 24, .little);
-    try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
     std.mem.writeInt(u16, bytes[12..14], 24, .little);
     std.mem.writeInt(u16, bytes[14..16], options.page_size, .little);
     std.mem.writeInt(u16, bytes[16..18], options.page_size - 8, .little);
-    try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
     std.mem.writeInt(u16, bytes[14..16], options.page_size - 1, .little);
     std.mem.writeInt(u16, bytes[16..18], options.page_size - 1, .little);
-    try std.testing.expectError(error.InvalidPage, Page.fromBytes(&bytes));
+    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
 }
 
 test "new empty page formats its buffer in place" {
@@ -199,4 +230,45 @@ test "new empty page formats its buffer in place" {
     try std.testing.expectEqual(@as(u16, 0), header.flags());
     try std.testing.expectEqual(@as(u32, 0), header.pruneId());
     for (bytes[24..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "new empty page reserves aligned special space" {
+    const cases = [_]struct { requested: u16, reserved: u16 }{
+        .{ .requested = 0, .reserved = 0 },
+        .{ .requested = 13, .reserved = 16 },
+        .{ .requested = 16, .reserved = 16 },
+    };
+
+    for (cases) |case| {
+        var bytes: [options.page_size]u8 = @splat(0xaa);
+        const empty = try EmptyPage.newWithSpecialSize(&bytes, case.requested);
+        const header = HeaderView.new(empty.bytes[0..HEADER_SIZE]);
+        const expected_start: u16 = @intCast(options.page_size - case.reserved);
+
+        try std.testing.expectEqual(@as(u16, HEADER_SIZE), header.lower());
+        try std.testing.expectEqual(expected_start, header.upper());
+        try std.testing.expectEqual(expected_start, header.special());
+        for (bytes[HEADER_SIZE..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+}
+
+test "oversized special space leaves the buffer unchanged" {
+    var bytes: [options.page_size]u8 = @splat(0xaa);
+    try std.testing.expectError(
+        error.SpecialSpaceTooLarge,
+        EmptyPage.newWithSpecialSize(&bytes, @intCast(options.page_size - HEADER_SIZE)),
+    );
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0xaa), byte);
+}
+
+test "checksummed page detects corruption and incorrect block number" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    _ = EmptyPage.new(&bytes);
+    const block_number: u32 = 42;
+    const expected = checksum.calculate(&bytes, block_number);
+    std.mem.writeInt(u16, bytes[8..10], expected, .little);
+    _ = try PageView.fromBytes(&bytes, block_number);
+    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&bytes, block_number + 1));
+    bytes[HEADER_SIZE] ^= 1;
+    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&bytes, block_number));
 }
