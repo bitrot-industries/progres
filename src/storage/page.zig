@@ -8,6 +8,7 @@ pub const checksum = @import("page/checksum.zig");
 
 pub const LocationIndex = u16;
 pub const TransactionId = u32;
+pub const SlotNumber = u16;
 
 const HeaderLayout = struct {
     const size: usize = 24;
@@ -65,7 +66,7 @@ pub const EmptyPage = struct {
 
     /// `special_start` is an offset from the beginning of the page.
     fn initializeHeader(bytes: *[HeaderLayout.size]u8, special_start: u16) void {
-        const header = MutableView{ .bytes = bytes };
+        const header = MutableHeader{ .bytes = bytes };
         // The empty line-pointer array ends immediately after the header.
         header.setLower(HeaderLayout.size);
 
@@ -93,11 +94,39 @@ pub const PageView = struct {
     }
 
     pub fn header(self: *const PageView) HeaderView {
-        return HeaderView.new(self.bytes[0..24]);
+        return HeaderView.new(self.bytes[0..HeaderLayout.size]);
     }
 
     pub fn mutable(self: PageView) MutablePage {
         return MutablePage{ .bytes = @constCast(self.bytes) };
+    }
+
+    pub fn getItem(self: *const PageView, slot: SlotNumber) ![]const u8 {
+        const header_view = self.header();
+        const lower = header_view.lower();
+        const total_slots = (lower - HeaderLayout.size) / ItemId.size;
+        if (slot == 0 or total_slots < slot) return error.InvalidSlot;
+
+        const items = self.bytes[HeaderLayout.size..lower];
+        const start = (slot - 1) * ItemId.size;
+
+        const item_id_bytes = items[start..][0..ItemId.size];
+        const item_id = ItemId.decode(item_id_bytes);
+
+        // Convert before adding: offset and length are both u15.
+        const item_start: usize = item_id.offset;
+        const item_length: usize = item_id.length;
+        const item_end = item_start + item_length;
+
+        // Item bytes must be between the start of item storage and special space.
+        if (item_length == 0 or
+            item_start < header_view.upper() or
+            item_end > header_view.special())
+        {
+            return error.InvalidItem;
+        }
+
+        return self.bytes[item_start..item_end];
     }
 };
 
@@ -109,7 +138,7 @@ pub const MutablePage = struct {
     pub fn addItem(
         self: *MutablePage,
         item_bytes: []const u8,
-    ) !u16 {
+    ) !SlotNumber {
         const header_view = HeaderView.new(self.bytes[0..HeaderLayout.size]);
         const lower: usize = header_view.lower();
         const upper: usize = header_view.upper();
@@ -124,8 +153,6 @@ pub const MutablePage = struct {
 
         const item_start = upper - aligned_size;
 
-        // The source must not overlap the page buffer. This mutation makes
-        // the stored checksum stale; it must be set again before writing.
         @memcpy(self.bytes[item_start..][0..item_bytes.len], item_bytes);
 
         const line_pointer = ItemId.normal(item_start, item_bytes.len);
@@ -138,6 +165,10 @@ pub const MutablePage = struct {
         const slot_number = (lower - HeaderLayout.size) / ItemId.size + 1;
         return @intCast(slot_number);
     }
+
+    pub fn header(self: *MutablePage) HeaderView {
+        return HeaderView.new(self.bytes[0..HeaderLayout.size]);
+    }
 };
 
 pub const HeaderView = struct {
@@ -148,8 +179,8 @@ pub const HeaderView = struct {
         return .{ .bytes = bytes };
     }
 
-    fn mutable(self: HeaderView) MutableView {
-        return MutableView{ .bytes = @constCast(self.bytes) };
+    fn mutable(self: HeaderView) MutableHeader {
+        return MutableHeader{ .bytes = @constCast(self.bytes) };
     }
 
     fn validate(self: HeaderView) error{InvalidPage}!void {
@@ -210,37 +241,37 @@ pub const HeaderView = struct {
     }
 };
 
-pub const MutableView = struct {
+pub const MutableHeader = struct {
     bytes: *[HeaderLayout.size]u8,
 
     /// Store the checksum calculated for this page.
-    pub fn setChecksum(self: MutableView, value: u16) void {
+    pub fn setChecksum(self: MutableHeader, value: u16) void {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.checksum_offset..][0..@sizeOf(u16)], value, .little);
     }
 
     /// Set page-state flags; callers must preserve valid flag bits.
-    pub fn setFlags(self: MutableView, value: u16) void {
+    pub fn setFlags(self: MutableHeader, value: u16) void {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.flags_offset..][0..@sizeOf(u16)], value, .little);
     }
 
     /// Set the end of the line-pointer array; caller maintains page invariants.
-    pub fn setLower(self: MutableView, value: LocationIndex) void {
+    pub fn setLower(self: MutableHeader, value: LocationIndex) void {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.lower_offset..][0..@sizeOf(u16)], value, .little);
     }
 
     /// Set the beginning of item storage; caller maintains page invariants.
-    pub fn setUpper(self: MutableView, value: LocationIndex) void {
+    pub fn setUpper(self: MutableHeader, value: LocationIndex) void {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.upper_offset..][0..@sizeOf(u16)], value, .little);
     }
 
     /// Set the beginning of the access method's reserved special space.
-    pub fn setSpecial(self: MutableView, value: LocationIndex) void {
+    pub fn setSpecial(self: MutableHeader, value: LocationIndex) void {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.special_offset..][0..@sizeOf(u16)], value, .little);
     }
 
     /// Store the page size and layout version in their shared header field.
     /// The page size must be a multiple of 256, leaving its low byte free.
-    pub fn setPageSizeVersion(self: MutableView, size: u16, version: u8) void {
+    pub fn setPageSizeVersion(self: MutableHeader, size: u16, version: u8) void {
         std.debug.assert(size & HeaderLayout.layout_version_mask == 0);
         std.mem.writeInt(u16, self.bytes[HeaderLayout.page_size_version_offset..][0..@sizeOf(u16)], size | @as(u16, version), .little);
     }
@@ -296,7 +327,7 @@ test "fromBytes validates initialized pages without copying" {
     var bytes: [options.page_size]u8 = @splat(0);
     try std.testing.expectError(error.UninitializedPage, PageView.fromBytes(&bytes, 0));
     _ = EmptyPage.new(&bytes);
-    const header = MutableView{ .bytes = bytes[0..HeaderLayout.size] };
+    const header = MutableHeader{ .bytes = bytes[0..HeaderLayout.size] };
     header.setChecksum(checksum.calculate(&bytes, 0));
     const page = try PageView.fromBytes(&bytes, 0);
     try std.testing.expect(page.bytes == &bytes);
@@ -371,7 +402,7 @@ test "checksummed page detects corruption and incorrect block number" {
     _ = EmptyPage.new(&bytes);
     const block_number: u32 = 42;
     const expected = checksum.calculate(&bytes, block_number);
-    const header = MutableView{ .bytes = bytes[0..HeaderLayout.size] };
+    const header = MutableHeader{ .bytes = bytes[0..HeaderLayout.size] };
     header.setChecksum(expected);
     _ = try PageView.fromBytes(&bytes, block_number);
     try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&bytes, block_number + 1));
@@ -397,6 +428,24 @@ test "addItem inserts aligned items and line pointers" {
     try std.testing.expectEqual(@as(u32, @intCast(second_start)) | (1 << 15) | (3 << 17), second);
     try std.testing.expectEqualStrings("hello", bytes[first_start..][0..5]);
     try std.testing.expectEqualStrings("abc", bytes[second_start..][0..3]);
+}
+
+test "getItem reads inserted items by slot and rejects invalid slots" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    const first = try page.addItem("hello");
+    const second = try page.addItem("abc");
+
+    const block_number: u32 = 42;
+
+    // update the checksum before we create the view - maybe fix this part of API
+    const header = page.header().mutable();
+    header.setChecksum(checksum.calculate(&bytes, block_number));
+    const page_view = try PageView.fromBytes(&bytes, block_number);
+    try std.testing.expectEqualStrings("hello", try page_view.getItem(first));
+    try std.testing.expectEqualStrings("abc", try page_view.getItem(second));
+    try std.testing.expectError(error.InvalidSlot, page_view.getItem(0));
+    try std.testing.expectError(error.InvalidSlot, page_view.getItem(second + 1));
 }
 
 test "addItem leaves the page unchanged on failure" {
