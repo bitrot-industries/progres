@@ -107,10 +107,10 @@ pub const PageView = struct {
         const total_slots = (lower - HeaderLayout.size) / ItemId.size;
         if (slot == 0 or total_slots < slot) return error.InvalidSlot;
 
-        const items = self.bytes[HeaderLayout.size..lower];
+        const item_ids = self.bytes[HeaderLayout.size..lower];
         const start = (slot - 1) * ItemId.size;
 
-        const item_id_bytes = items[start..][0..ItemId.size];
+        const item_id_bytes = item_ids[start..][0..ItemId.size];
         const item_id = ItemId.decode(item_id_bytes);
 
         // Convert before adding: offset and length are both u15.
