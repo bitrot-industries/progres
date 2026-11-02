@@ -20,8 +20,8 @@ const HeaderLayout = struct {
     const page_size_mask: u16 = 0xFF00;
     const layout_version_mask: u16 = 0x00FF;
 };
-// The page format uses an 8-byte boundary for special space.
-const SPECIAL_ALIGNMENT: usize = 8;
+// PostgreSQL's MAXIMUM_ALIGNOF is the larger target alignment of int64_t and double.
+const SPECIAL_ALIGNMENT: usize = @max(@alignOf(i64), @alignOf(f64));
 const ItemId = item.ItemId;
 
 pub const EmptyPage = struct {
@@ -387,14 +387,16 @@ test "addItem inserts aligned items and line pointers" {
     try std.testing.expectEqual(@as(u16, 2), try page.addItem("abc"));
     const header_view = HeaderView.new(bytes[0..HeaderLayout.size]);
     try std.testing.expectEqual(@as(u16, HeaderLayout.size + 8), header_view.lower());
-    try std.testing.expectEqual(@as(u16, options.page_size - 32), header_view.upper());
+    const first_start = options.page_size - 16 - std.mem.alignForward(usize, 5, SPECIAL_ALIGNMENT);
+    const second_start = first_start - std.mem.alignForward(usize, 3, SPECIAL_ALIGNMENT);
+    try std.testing.expectEqual(@as(u16, @intCast(second_start)), header_view.upper());
     try std.testing.expectEqual(@as(u16, options.page_size - 16), header_view.special());
     const first = std.mem.readInt(u32, bytes[24..28], .little);
     const second = std.mem.readInt(u32, bytes[28..32], .little);
-    try std.testing.expectEqual(@as(u32, @intCast(options.page_size - 24)) | (1 << 15) | (5 << 17), first);
-    try std.testing.expectEqual(@as(u32, @intCast(options.page_size - 32)) | (1 << 15) | (3 << 17), second);
-    try std.testing.expectEqualStrings("hello", bytes[options.page_size - 24 ..][0..5]);
-    try std.testing.expectEqualStrings("abc", bytes[options.page_size - 32 ..][0..3]);
+    try std.testing.expectEqual(@as(u32, @intCast(first_start)) | (1 << 15) | (5 << 17), first);
+    try std.testing.expectEqual(@as(u32, @intCast(second_start)) | (1 << 15) | (3 << 17), second);
+    try std.testing.expectEqualStrings("hello", bytes[first_start..][0..5]);
+    try std.testing.expectEqualStrings("abc", bytes[second_start..][0..3]);
 }
 
 test "addItem leaves the page unchanged on failure" {
