@@ -21,6 +21,7 @@ const HeaderLayout = struct {
     const page_size_mask: u16 = 0xFF00;
     const layout_version_mask: u16 = 0x00FF;
 };
+
 // PostgreSQL's MAXIMUM_ALIGNOF is the larger target alignment of int64_t and double.
 const SPECIAL_ALIGNMENT: usize = @max(@alignOf(i64), @alignOf(f64));
 const ItemId = item.ItemId;
@@ -198,6 +199,18 @@ pub const HeaderView = struct {
             self.special() % SPECIAL_ALIGNMENT != 0) return error.InvalidPage;
     }
 
+    pub fn exactFreeSpace(self: HeaderView) usize {
+        // todo: make sure this stands always:
+        // Headers are always valid/validate when constructed so it should not be necessary to check `upper < lower`
+        return self.upper() - self.lower();
+    }
+
+    pub fn freeSpace(self: HeaderView) usize {
+        const exactSpace = self.exactFreeSpace();
+        if (exactSpace < ItemId.size) return 0;
+        return exactSpace - ItemId.size;
+    }
+
     /// Header fields
     pub fn logSequenceNumber(self: HeaderView) u64 {
         return std.mem.readInt(u64, self.bytes[0..8], .little);
@@ -276,6 +289,26 @@ pub const MutableHeader = struct {
         std.mem.writeInt(u16, self.bytes[HeaderLayout.page_size_version_offset..][0..@sizeOf(u16)], size | @as(u16, version), .little);
     }
 };
+
+test "header reports exact free space and reserves a line pointer" {
+    var bytes: [HeaderLayout.size]u8 = @splat(0);
+    const header = HeaderView.new(&bytes);
+    const mutable_header = header.mutable();
+    const lower: u16 = HeaderLayout.size;
+    mutable_header.setLower(lower);
+
+    const cases = [_]struct { gap: u16, available: usize }{
+        .{ .gap = 0, .available = 0 },
+        .{ .gap = ItemId.size - 1, .available = 0 },
+        .{ .gap = ItemId.size, .available = 0 },
+        .{ .gap = 20, .available = 20 - ItemId.size },
+    };
+    for (cases) |case| {
+        mutable_header.setUpper(lower + case.gap);
+        try std.testing.expectEqual(@as(usize, case.gap), header.exactFreeSpace());
+        try std.testing.expectEqual(case.available, header.freeSpace());
+    }
+}
 
 test "mutable header setters update the corresponding boundaries" {
     var bytes: [HeaderLayout.size]u8 = @splat(0);
