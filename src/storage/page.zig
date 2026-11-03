@@ -211,6 +211,14 @@ pub const HeaderView = struct {
         return exactSpace - ItemId.size;
     }
 
+    pub fn freeSpaceForMultipleItems(self: HeaderView, n: usize) usize {
+        const exact = self.exactFreeSpace();
+        if (n > exact / ItemId.size) return 0;
+
+        const item_ids_required = (n * ItemId.size);
+        return exact - item_ids_required;
+    }
+
     /// Header fields
     pub fn logSequenceNumber(self: HeaderView) u64 {
         return std.mem.readInt(u64, self.bytes[0..8], .little);
@@ -308,6 +316,21 @@ test "header reports exact free space and reserves a line pointer" {
         try std.testing.expectEqual(@as(usize, case.gap), header.exactFreeSpace());
         try std.testing.expectEqual(case.available, header.freeSpace());
     }
+}
+
+test "free space for multiple items accounts for line pointers safely" {
+    var bytes: [HeaderLayout.size]u8 = @splat(0);
+    const header = HeaderView.new(&bytes);
+    const mutable_header = header.mutable();
+    mutable_header.setLower(HeaderLayout.size);
+    mutable_header.setUpper(HeaderLayout.size + 20);
+
+    try std.testing.expectEqual(@as(usize, 20), header.freeSpaceForMultipleItems(0));
+    try std.testing.expectEqual(@as(usize, 20 - ItemId.size), header.freeSpaceForMultipleItems(1));
+    try std.testing.expectEqual(@as(usize, 20 - 3 * ItemId.size), header.freeSpaceForMultipleItems(3));
+    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(20 / ItemId.size));
+    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(20 / ItemId.size + 1));
+    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(std.math.maxInt(usize)));
 }
 
 test "mutable header setters update the corresponding boundaries" {
