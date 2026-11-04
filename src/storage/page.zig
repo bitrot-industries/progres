@@ -99,6 +99,10 @@ pub const PageView = struct {
         return HeaderView.new(self.bytes[0..HeaderLayout.size]);
     }
 
+    pub fn specialSpace(self: *const PageView) []const u8 {
+        return self.bytes[self.header().special()..];
+    }
+
     pub fn mutable(self: PageView) MutablePage {
         return MutablePage{ .bytes = @constCast(self.bytes) };
     }
@@ -170,6 +174,13 @@ pub const MutablePage = struct {
 
     pub fn header(self: *MutablePage) HeaderView {
         return HeaderView.new(self.bytes[0..HeaderLayout.size]);
+    }
+
+    pub fn setSpecialSpace(self: *MutablePage, data: []const u8) !void {
+        const start = self.header().special();
+        const available = self.bytes[start..];
+        if (data.len > available.len) return error.SpecialSpaceTooSmall;
+        @memcpy(available[0..data.len], data);
     }
 
     pub fn prepare(self: *MutablePage, block_number: BlockNumber) PreparedPage {
@@ -471,6 +482,32 @@ test "oversized special space leaves the buffer unchanged" {
         EmptyPage.newWithSpecialSize(&bytes, @intCast(options.page_size - HeaderLayout.size)),
     );
     for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0xaa), byte);
+}
+
+test "special space can be set and read through page states" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = (try EmptyPage.newWithSpecialSize(&bytes, 13)).mutable();
+    const slot = try page.addItem("item");
+    try page.setSpecialSpace("metadata");
+    const view = page.prepare(42).view();
+    const special = view.specialSpace();
+    try std.testing.expectEqual(@as(usize, std.mem.alignForward(usize, 13, SPECIAL_ALIGNMENT)), special.len);
+    try std.testing.expectEqualStrings("metadata", special[0..8]);
+    for (special[8..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqualStrings("item", try view.getItem(slot));
+}
+
+test "special space rejects oversized writes without changing the page" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    try page.setSpecialSpace("");
+    try std.testing.expectError(error.SpecialSpaceTooSmall, page.setSpecialSpace("x"));
+    try std.testing.expectEqual(@as(usize, 0), page.prepare(42).view().specialSpace().len);
+
+    page = (try EmptyPage.newWithSpecialSize(&bytes, 8)).mutable();
+    try page.setSpecialSpace("original");
+    try std.testing.expectError(error.SpecialSpaceTooSmall, page.setSpecialSpace("too long!"));
+    try std.testing.expectEqualStrings("original", page.prepare(42).view().specialSpace());
 }
 
 test "checksummed page detects corruption and incorrect block number" {
