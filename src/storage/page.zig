@@ -9,6 +9,7 @@ pub const checksum = @import("page/checksum.zig");
 pub const LocationIndex = u16;
 pub const TransactionId = u32;
 pub const SlotNumber = u16;
+pub const BlockNumber = u32;
 
 const HeaderLayout = struct {
     const size: usize = 24;
@@ -83,7 +84,7 @@ pub const EmptyPage = struct {
 pub const PageView = struct {
     bytes: *const [options.page_size]u8,
 
-    pub fn fromBytes(bytes: *[options.page_size]u8, block_number: u32) !PageView {
+    pub fn fromBytes(bytes: *[options.page_size]u8, block_number: BlockNumber) !PageView {
         if (std.mem.allEqual(u8, bytes, 0)) {
             return error.UninitializedPage;
         }
@@ -169,6 +170,21 @@ pub const MutablePage = struct {
 
     pub fn header(self: *MutablePage) HeaderView {
         return HeaderView.new(self.bytes[0..HeaderLayout.size]);
+    }
+
+    pub fn prepare(self: *MutablePage, block_number: BlockNumber) PreparedPage {
+        self.header().mutable().setChecksum(checksum.calculate(self.bytes, block_number));
+        return .{ .bytes = self.bytes };
+    }
+};
+
+pub const PreparedPage = struct {
+    bytes: *const [options.page_size]u8,
+
+    pub fn write() !void {}
+
+    pub fn view(self: PreparedPage) PageView {
+        return .{ .bytes = self.bytes };
     }
 };
 
@@ -459,15 +475,16 @@ test "oversized special space leaves the buffer unchanged" {
 
 test "checksummed page detects corruption and incorrect block number" {
     var bytes: [options.page_size]u8 = @splat(0);
-    _ = EmptyPage.new(&bytes);
-    const block_number: u32 = 42;
-    const expected = checksum.calculate(&bytes, block_number);
-    const header = MutableHeader{ .bytes = bytes[0..HeaderLayout.size] };
-    header.setChecksum(expected);
-    _ = try PageView.fromBytes(&bytes, block_number);
-    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&bytes, block_number + 1));
-    bytes[HeaderLayout.size] ^= 1;
-    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&bytes, block_number));
+    var page = EmptyPage.new(&bytes).mutable();
+    const block_number: BlockNumber = 42;
+    const prepared = page.prepare(block_number);
+
+    // Simulate reading the prepared page back from storage.
+    var read_buffer = prepared.bytes.*;
+    _ = try PageView.fromBytes(&read_buffer, block_number);
+    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&read_buffer, block_number + 1));
+    read_buffer[HeaderLayout.size] ^= 1;
+    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(&read_buffer, block_number));
 }
 
 test "addItem inserts aligned items and line pointers" {
@@ -496,16 +513,26 @@ test "getItem reads inserted items by slot and rejects invalid slots" {
     const first = try page.addItem("hello");
     const second = try page.addItem("abc");
 
-    const block_number: u32 = 42;
+    const block_number: BlockNumber = 42;
 
-    // update the checksum before we create the view - maybe fix this part of API
-    const header = page.header().mutable();
-    header.setChecksum(checksum.calculate(&bytes, block_number));
-    const page_view = try PageView.fromBytes(&bytes, block_number);
+    const page_view = page.prepare(block_number).view();
     try std.testing.expectEqualStrings("hello", try page_view.getItem(first));
     try std.testing.expectEqualStrings("abc", try page_view.getItem(second));
     try std.testing.expectError(error.InvalidSlot, page_view.getItem(0));
     try std.testing.expectError(error.InvalidSlot, page_view.getItem(second + 1));
+}
+
+test "preparing again updates the checksum after a page change" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    const block_number: BlockNumber = 42;
+    const first_view = page.prepare(block_number).view();
+    page = first_view.mutable();
+
+    const slot = try page.addItem("hello");
+    try std.testing.expectError(error.ChecksumMismatch, PageView.fromBytes(page.bytes, block_number));
+    const view = page.prepare(block_number).view();
+    try std.testing.expectEqualStrings("hello", try view.getItem(slot));
 }
 
 test "addItem leaves the page unchanged on failure" {
