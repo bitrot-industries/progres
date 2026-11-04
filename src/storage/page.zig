@@ -105,8 +105,8 @@ pub const PageView = struct {
     pub fn getItem(self: *const PageView, slot: SlotNumber) ![]const u8 {
         const header_view = self.header();
         const lower = header_view.lower();
-        const total_slots = (lower - HeaderLayout.size) / ItemId.size;
-        if (slot == 0 or total_slots < slot) return error.InvalidSlot;
+        const slot_count = header_view.slotCount();
+        if (slot == 0 or slot_count < slot) return error.InvalidSlot;
 
         const item_ids = self.bytes[HeaderLayout.size..lower];
         const start = (slot - 1) * ItemId.size;
@@ -197,6 +197,10 @@ pub const HeaderView = struct {
             // Special space must start within the page, on its required boundary.
             self.special() > options.page_size or
             self.special() % SPECIAL_ALIGNMENT != 0) return error.InvalidPage;
+    }
+
+    pub fn slotCount(self: HeaderView) usize {
+        return (self.lower() - HeaderLayout.size) / ItemId.size;
     }
 
     pub fn exactFreeSpace(self: HeaderView) usize {
