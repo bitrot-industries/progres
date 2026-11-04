@@ -176,6 +176,15 @@ pub const MutablePage = struct {
         return HeaderView.new(self.bytes[0..HeaderLayout.size]);
     }
 
+    pub fn markSlotUnused(self: *MutablePage, slot: SlotNumber) !void {
+        const header_view = self.header();
+        if (slot == 0 or slot > header_view.slotCount()) return error.InvalidSlot;
+
+        const start = HeaderLayout.size + (slot - 1) * ItemId.size;
+        // An unused ItemId has zero offset, state, and length.
+        @memset(self.bytes[start..][0..ItemId.size], 0);
+    }
+
     pub fn setSpecialSpace(self: *MutablePage, data: []const u8) !void {
         const start = self.header().special();
         const available = self.bytes[start..];
@@ -508,6 +517,27 @@ test "special space rejects oversized writes without changing the page" {
     try page.setSpecialSpace("original");
     try std.testing.expectError(error.SpecialSpaceTooSmall, page.setSpecialSpace("too long!"));
     try std.testing.expectEqualStrings("original", page.prepare(42).view().specialSpace());
+}
+
+test "markSlotUnused clears only the requested line pointer" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    const first = try page.addItem("first");
+    const second = try page.addItem("second");
+    const before = bytes;
+    try std.testing.expectError(error.InvalidSlot, page.markSlotUnused(0));
+    try std.testing.expectError(error.InvalidSlot, page.markSlotUnused(second + 1));
+    try std.testing.expectEqualSlices(u8, &before, &bytes);
+
+    try page.markSlotUnused(first);
+    const start = HeaderLayout.size + (first - 1) * ItemId.size;
+    const cleared = ItemId.decode(bytes[start..][0..ItemId.size]);
+    try std.testing.expectEqual(ItemId.State.unused, cleared.state);
+    try std.testing.expectEqual(@as(u15, 0), cleared.offset);
+    try std.testing.expectEqual(@as(u15, 0), cleared.length);
+    try std.testing.expectEqual(@as(usize, 2), page.header().slotCount());
+    const view = page.prepare(42).view();
+    try std.testing.expectEqualStrings("second", try view.getItem(second));
 }
 
 test "checksummed page detects corruption and incorrect block number" {

@@ -49,3 +49,4 @@ test "decode reads offset, state, and length from line-pointer bytes" {
     try std.testing.expectEqual(ItemId.State.normal, id.state);
     try std.testing.expectEqual(@as(u15, 5), id.length);
 }
+
