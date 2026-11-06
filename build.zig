@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     const options = get_options(b);
 
     const page = b.addModule("page", .{
-        .root_source_file = b.path("src/storage/page.zig"),
+        .root_source_file = b.path("src/storage/page/page.zig"),
         .target = target,
         .optimize = optimize,
     });

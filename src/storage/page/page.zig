@@ -3,28 +3,19 @@
 const std = @import("std");
 const options = @import("options");
 
-pub const item = @import("page/item.zig");
-pub const checksum = @import("page/checksum.zig");
+pub const item = @import("item.zig");
+pub const checksum = @import("checksum.zig");
+pub const header = @import("header.zig");
 
-pub const LocationIndex = u16;
-pub const TransactionId = u32;
 pub const SlotNumber = u16;
 pub const BlockNumber = u32;
 
-const HeaderLayout = struct {
-    const size: usize = 24;
-    const checksum_offset: usize = 8;
-    const flags_offset: usize = 10;
-    const lower_offset: usize = 12;
-    const upper_offset: usize = 14;
-    const special_offset: usize = 16;
-    const page_size_version_offset: usize = 18;
-    const page_size_mask: u16 = 0xFF00;
-    const layout_version_mask: u16 = 0x00FF;
-};
+const HeaderLayout = header.HeaderLayout;
+const HeaderView = header.HeaderView;
+const MutableHeader = header.MutableHeader;
 
 // PostgreSQL's MAXIMUM_ALIGNOF is the larger target alignment of int64_t and double.
-const SPECIAL_ALIGNMENT: usize = @max(@alignOf(i64), @alignOf(f64));
+pub const SPECIAL_ALIGNMENT: usize = @max(@alignOf(i64), @alignOf(f64));
 const ItemId = item.ItemId;
 
 pub const EmptyPage = struct {
@@ -68,16 +59,17 @@ pub const EmptyPage = struct {
 
     /// `special_start` is an offset from the beginning of the page.
     fn initializeHeader(bytes: *[HeaderLayout.size]u8, special_start: u16) void {
-        const header = MutableHeader{ .bytes = bytes };
+        // SAFETY: fine to start with empty bytes that we set now
+        const header_mut = MutableHeader.unchecked(bytes);
         // The empty line-pointer array ends immediately after the header.
-        header.setLower(HeaderLayout.size);
+        header_mut.setLower(HeaderLayout.size);
 
         // There are no items yet, so both boundaries start at special space.
-        header.setUpper(special_start);
-        header.setSpecial(special_start);
+        header_mut.setUpper(special_start);
+        header_mut.setSpecial(special_start);
 
         // Store the page size and layout version together.
-        header.setPageSizeVersion(options.page_size, EmptyPage.layout_version);
+        header_mut.setPageSizeVersion(options.page_size, EmptyPage.layout_version);
     }
 };
 
@@ -89,18 +81,18 @@ pub const PageView = struct {
             return error.UninitializedPage;
         }
 
-        const header_view = HeaderView.new(bytes[0..HeaderLayout.size]);
-        try header_view.validate();
+        const header_view = try HeaderView.init(bytes[0..HeaderLayout.size]);
         if (header_view.checksum() != checksum.calculate(bytes, block_number)) return error.ChecksumMismatch;
         return .{ .bytes = bytes };
     }
 
-    pub fn header(self: *const PageView) HeaderView {
-        return HeaderView.new(self.bytes[0..HeaderLayout.size]);
+    pub fn page_header(self: *const PageView) HeaderView {
+        // SAFETY: this was checked in `fromBytes`
+        return HeaderView.unchecked(self.bytes[0..HeaderLayout.size]);
     }
 
     pub fn specialSpace(self: *const PageView) []const u8 {
-        return self.bytes[self.header().special()..];
+        return self.bytes[self.page_header().special()..];
     }
 
     pub fn mutable(self: PageView) MutablePage {
@@ -108,7 +100,7 @@ pub const PageView = struct {
     }
 
     pub fn getItem(self: *const PageView, slot: SlotNumber) ![]const u8 {
-        const header_view = self.header();
+        const header_view = self.page_header();
         const lower = header_view.lower();
         const slot_count = header_view.slotCount();
         if (slot == 0 or slot_count < slot) return error.InvalidSlot;
@@ -145,9 +137,9 @@ pub const MutablePage = struct {
         self: *MutablePage,
         item_bytes: []const u8,
     ) !SlotNumber {
-        const header_view = HeaderView.new(self.bytes[0..HeaderLayout.size]);
-        const lower: usize = header_view.lower();
-        const upper: usize = header_view.upper();
+        const mutable_header = try MutableHeader.init(self.bytes[0..HeaderLayout.size]);
+        const lower: usize = mutable_header.lower();
+        const upper: usize = mutable_header.upper();
 
         // The region between the header and lower must contain whole slots.
         if ((lower - HeaderLayout.size) % ItemId.size != 0) return error.InvalidPage;
@@ -164,7 +156,6 @@ pub const MutablePage = struct {
         const line_pointer = ItemId.normal(item_start, item_bytes.len);
         line_pointer.encode(self.bytes[lower..][0..ItemId.size]);
 
-        const mutable_header = header_view.mutable();
         mutable_header.setLower(@intCast(lower + ItemId.size));
         mutable_header.setUpper(@intCast(item_start));
 
@@ -172,12 +163,12 @@ pub const MutablePage = struct {
         return @intCast(slot_number);
     }
 
-    pub fn header(self: *MutablePage) HeaderView {
-        return HeaderView.new(self.bytes[0..HeaderLayout.size]);
+    pub fn page_header(self: *MutablePage) HeaderView {
+        return HeaderView.unchecked(self.bytes[0..HeaderLayout.size]);
     }
 
     pub fn markSlotUnused(self: *MutablePage, slot: SlotNumber) !void {
-        const header_view = self.header();
+        const header_view = self.page_header();
         if (slot == 0 or slot > header_view.slotCount()) return error.InvalidSlot;
 
         const start = HeaderLayout.size + (slot - 1) * ItemId.size;
@@ -186,15 +177,19 @@ pub const MutablePage = struct {
     }
 
     pub fn setSpecialSpace(self: *MutablePage, data: []const u8) !void {
-        const start = self.header().special();
+        const start = self.page_header().special();
         const available = self.bytes[start..];
         if (data.len > available.len) return error.SpecialSpaceTooSmall;
         @memcpy(available[0..data.len], data);
     }
 
     pub fn prepare(self: *MutablePage, block_number: BlockNumber) PreparedPage {
-        self.header().mutable().setChecksum(checksum.calculate(self.bytes, block_number));
+        self.page_header_mut().setChecksum(checksum.calculate(self.bytes, block_number));
         return .{ .bytes = self.bytes };
+    }
+
+    fn page_header_mut(self: *MutablePage) MutableHeader {
+        return MutableHeader.unchecked(self.bytes[0..HeaderLayout.size]);
     }
 };
 
@@ -207,191 +202,6 @@ pub const PreparedPage = struct {
         return .{ .bytes = self.bytes };
     }
 };
-
-pub const HeaderView = struct {
-    const valid_flag_bits: u16 = 0x0007;
-    bytes: *const [HeaderLayout.size]u8,
-
-    fn new(bytes: *const [HeaderLayout.size]u8) HeaderView {
-        return .{ .bytes = bytes };
-    }
-
-    fn mutable(self: HeaderView) MutableHeader {
-        return MutableHeader{ .bytes = @constCast(self.bytes) };
-    }
-
-    fn validate(self: HeaderView) error{InvalidPage}!void {
-        if (
-        // Only defined page-state flags may be set.
-        self.flags() & ~HeaderView.valid_flag_bits != 0 or
-            // The line-pointer area cannot begin inside the fixed header.
-            self.lower() < HeaderLayout.size or
-            // The beginning of free space cannot pass its end.
-            self.lower() > self.upper() or
-            // Item storage cannot extend into the special-space area.
-            self.upper() > self.special() or
-            // Special space must start within the page, on its required boundary.
-            self.special() > options.page_size or
-            self.special() % SPECIAL_ALIGNMENT != 0) return error.InvalidPage;
-    }
-
-    pub fn slotCount(self: HeaderView) usize {
-        return (self.lower() - HeaderLayout.size) / ItemId.size;
-    }
-
-    pub fn exactFreeSpace(self: HeaderView) usize {
-        // todo: make sure this stands always:
-        // Headers are always valid/validate when constructed so it should not be necessary to check `upper < lower`
-        return self.upper() - self.lower();
-    }
-
-    pub fn freeSpace(self: HeaderView) usize {
-        const exactSpace = self.exactFreeSpace();
-        if (exactSpace < ItemId.size) return 0;
-        return exactSpace - ItemId.size;
-    }
-
-    pub fn freeSpaceForMultipleItems(self: HeaderView, n: usize) usize {
-        const exact = self.exactFreeSpace();
-        if (n > exact / ItemId.size) return 0;
-
-        const item_ids_required = (n * ItemId.size);
-        return exact - item_ids_required;
-    }
-
-    /// Header fields
-    pub fn logSequenceNumber(self: HeaderView) u64 {
-        return std.mem.readInt(u64, self.bytes[0..8], .little);
-    }
-
-    pub fn checksum(self: HeaderView) u16 {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.checksum_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn flags(self: HeaderView) u16 {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.flags_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn lower(self: HeaderView) LocationIndex {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.lower_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn upper(self: HeaderView) LocationIndex {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.upper_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn special(self: HeaderView) LocationIndex {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.special_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn pageSizeVersion(self: HeaderView) u16 {
-        return std.mem.readInt(u16, self.bytes[HeaderLayout.page_size_version_offset..][0..@sizeOf(u16)], .little);
-    }
-
-    pub fn pruneId(self: HeaderView) TransactionId {
-        return std.mem.readInt(u32, self.bytes[20..24], .little);
-    }
-
-    /// Further helpers
-    pub fn pageSize(self: HeaderView) u16 {
-        return self.pageSizeVersion() & HeaderLayout.page_size_mask;
-    }
-
-    pub fn layoutVersion(self: HeaderView) u8 {
-        return @intCast(self.pageSizeVersion() & HeaderLayout.layout_version_mask);
-    }
-};
-
-pub const MutableHeader = struct {
-    bytes: *[HeaderLayout.size]u8,
-
-    /// Store the checksum calculated for this page.
-    pub fn setChecksum(self: MutableHeader, value: u16) void {
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.checksum_offset..][0..@sizeOf(u16)], value, .little);
-    }
-
-    /// Set page-state flags; callers must preserve valid flag bits.
-    pub fn setFlags(self: MutableHeader, value: u16) void {
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.flags_offset..][0..@sizeOf(u16)], value, .little);
-    }
-
-    /// Set the end of the line-pointer array; caller maintains page invariants.
-    pub fn setLower(self: MutableHeader, value: LocationIndex) void {
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.lower_offset..][0..@sizeOf(u16)], value, .little);
-    }
-
-    /// Set the beginning of item storage; caller maintains page invariants.
-    pub fn setUpper(self: MutableHeader, value: LocationIndex) void {
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.upper_offset..][0..@sizeOf(u16)], value, .little);
-    }
-
-    /// Set the beginning of the access method's reserved special space.
-    pub fn setSpecial(self: MutableHeader, value: LocationIndex) void {
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.special_offset..][0..@sizeOf(u16)], value, .little);
-    }
-
-    /// Store the page size and layout version in their shared header field.
-    /// The page size must be a multiple of 256, leaving its low byte free.
-    pub fn setPageSizeVersion(self: MutableHeader, size: u16, version: u8) void {
-        std.debug.assert(size & HeaderLayout.layout_version_mask == 0);
-        std.mem.writeInt(u16, self.bytes[HeaderLayout.page_size_version_offset..][0..@sizeOf(u16)], size | @as(u16, version), .little);
-    }
-};
-
-test "header reports exact free space and reserves a line pointer" {
-    var bytes: [HeaderLayout.size]u8 = @splat(0);
-    const header = HeaderView.new(&bytes);
-    const mutable_header = header.mutable();
-    const lower: u16 = HeaderLayout.size;
-    mutable_header.setLower(lower);
-
-    const cases = [_]struct { gap: u16, available: usize }{
-        .{ .gap = 0, .available = 0 },
-        .{ .gap = ItemId.size - 1, .available = 0 },
-        .{ .gap = ItemId.size, .available = 0 },
-        .{ .gap = 20, .available = 20 - ItemId.size },
-    };
-    for (cases) |case| {
-        mutable_header.setUpper(lower + case.gap);
-        try std.testing.expectEqual(@as(usize, case.gap), header.exactFreeSpace());
-        try std.testing.expectEqual(case.available, header.freeSpace());
-    }
-}
-
-test "free space for multiple items accounts for line pointers safely" {
-    var bytes: [HeaderLayout.size]u8 = @splat(0);
-    const header = HeaderView.new(&bytes);
-    const mutable_header = header.mutable();
-    mutable_header.setLower(HeaderLayout.size);
-    mutable_header.setUpper(HeaderLayout.size + 20);
-
-    try std.testing.expectEqual(@as(usize, 20), header.freeSpaceForMultipleItems(0));
-    try std.testing.expectEqual(@as(usize, 20 - ItemId.size), header.freeSpaceForMultipleItems(1));
-    try std.testing.expectEqual(@as(usize, 20 - 3 * ItemId.size), header.freeSpaceForMultipleItems(3));
-    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(20 / ItemId.size));
-    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(20 / ItemId.size + 1));
-    try std.testing.expectEqual(@as(usize, 0), header.freeSpaceForMultipleItems(std.math.maxInt(usize)));
-}
-
-test "mutable header setters update the corresponding boundaries" {
-    var bytes: [HeaderLayout.size]u8 = @splat(0);
-    const header = HeaderView.new(&bytes);
-    const mutable_header = header.mutable();
-    mutable_header.setChecksum(0x1234);
-    mutable_header.setFlags(0x0003);
-    mutable_header.setLower(32);
-    mutable_header.setUpper(512);
-    mutable_header.setSpecial(768);
-    mutable_header.setPageSizeVersion(1024, 4);
-    try std.testing.expectEqual(@as(u16, 0x1234), header.checksum());
-    try std.testing.expectEqual(@as(u16, 0x0003), header.flags());
-    try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12, 0x03, 0x00 }, bytes[HeaderLayout.checksum_offset..HeaderLayout.lower_offset]);
-    try std.testing.expectEqual(@as(LocationIndex, 32), header.lower());
-    try std.testing.expectEqual(@as(LocationIndex, 512), header.upper());
-    try std.testing.expectEqual(@as(LocationIndex, 768), header.special());
-    try std.testing.expectEqual(@as(u16, 1024), header.pageSize());
-    try std.testing.expectEqual(@as(u8, 4), header.layoutVersion());
-}
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -423,44 +233,44 @@ test "fromBytes validates initialized pages without copying" {
     var bytes: [options.page_size]u8 = @splat(0);
     try std.testing.expectError(error.UninitializedPage, PageView.fromBytes(&bytes, 0));
     _ = EmptyPage.new(&bytes);
-    const header = MutableHeader{ .bytes = bytes[0..HeaderLayout.size] };
-    header.setChecksum(checksum.calculate(&bytes, 0));
+    const header_mut = try MutableHeader.init(bytes[0..HeaderLayout.size]);
+    header_mut.setChecksum(checksum.calculate(&bytes, 0));
     const page = try PageView.fromBytes(&bytes, 0);
     try std.testing.expect(page.bytes == &bytes);
-    try std.testing.expectEqual(@as(u16, HeaderLayout.size), page.header().lower());
+    try std.testing.expectEqual(@as(u16, HeaderLayout.size), page.page_header().lower());
 
-    header.setFlags(0x8000);
-    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
-    header.setFlags(0);
-    header.setLower(23);
-    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
-    header.setLower(options.page_size);
-    header.setUpper(HeaderLayout.size);
-    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
-    header.setLower(HeaderLayout.size);
-    header.setUpper(options.page_size);
-    header.setSpecial(options.page_size - SPECIAL_ALIGNMENT);
-    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
-    header.setUpper(options.page_size - 1);
-    header.setSpecial(options.page_size - 1);
-    try std.testing.expectError(error.InvalidPage, PageView.fromBytes(&bytes, 0));
+    header_mut.setFlags(0x8000);
+    try std.testing.expectError(error.InvalidHeader, PageView.fromBytes(&bytes, 0));
+    header_mut.setFlags(0);
+    header_mut.setLower(23);
+    try std.testing.expectError(error.InvalidHeader, PageView.fromBytes(&bytes, 0));
+    header_mut.setLower(options.page_size);
+    header_mut.setUpper(HeaderLayout.size);
+    try std.testing.expectError(error.InvalidHeader, PageView.fromBytes(&bytes, 0));
+    header_mut.setLower(HeaderLayout.size);
+    header_mut.setUpper(options.page_size);
+    header_mut.setSpecial(options.page_size - SPECIAL_ALIGNMENT);
+    try std.testing.expectError(error.InvalidHeader, PageView.fromBytes(&bytes, 0));
+    header_mut.setUpper(options.page_size - 1);
+    header_mut.setSpecial(options.page_size - 1);
+    try std.testing.expectError(error.InvalidHeader, PageView.fromBytes(&bytes, 0));
 }
 
 test "new empty page formats its buffer in place" {
     var bytes: [options.page_size]u8 = @splat(0xaa);
     const page = EmptyPage.new(&bytes);
-    const header = HeaderView.new(page.bytes[0..24]);
+    const header_view = try HeaderView.init(page.bytes[0..24]);
 
     try std.testing.expectEqual(&bytes, page.bytes);
-    try std.testing.expectEqual(@as(u16, 24), header.lower());
-    try std.testing.expectEqual(@as(u16, options.page_size), header.upper());
-    try std.testing.expectEqual(@as(u16, options.page_size), header.special());
-    try std.testing.expectEqual(@as(u16, options.page_size), header.pageSize());
-    try std.testing.expectEqual(@as(u8, EmptyPage.layout_version), header.layoutVersion());
-    try std.testing.expectEqual(@as(u64, 0), header.logSequenceNumber());
-    try std.testing.expectEqual(@as(u16, 0), header.checksum());
-    try std.testing.expectEqual(@as(u16, 0), header.flags());
-    try std.testing.expectEqual(@as(u32, 0), header.pruneId());
+    try std.testing.expectEqual(@as(u16, 24), header_view.lower());
+    try std.testing.expectEqual(@as(u16, options.page_size), header_view.upper());
+    try std.testing.expectEqual(@as(u16, options.page_size), header_view.special());
+    try std.testing.expectEqual(@as(u16, options.page_size), header_view.pageSize());
+    try std.testing.expectEqual(@as(u8, EmptyPage.layout_version), header_view.layoutVersion());
+    try std.testing.expectEqual(@as(u64, 0), header_view.logSequenceNumber());
+    try std.testing.expectEqual(@as(u16, 0), header_view.checksum());
+    try std.testing.expectEqual(@as(u16, 0), header_view.flags());
+    try std.testing.expectEqual(@as(u32, 0), header_view.pruneId());
     for (bytes[24..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
@@ -474,12 +284,12 @@ test "new empty page reserves aligned special space" {
     for (cases) |case| {
         var bytes: [options.page_size]u8 = @splat(0xaa);
         const empty = try EmptyPage.newWithSpecialSize(&bytes, case.requested);
-        const header = HeaderView.new(empty.bytes[0..HeaderLayout.size]);
+        const header_view = try HeaderView.init(empty.bytes[0..HeaderLayout.size]);
         const expected_start: u16 = @intCast(options.page_size - case.reserved);
 
-        try std.testing.expectEqual(@as(u16, HeaderLayout.size), header.lower());
-        try std.testing.expectEqual(expected_start, header.upper());
-        try std.testing.expectEqual(expected_start, header.special());
+        try std.testing.expectEqual(@as(u16, HeaderLayout.size), header_view.lower());
+        try std.testing.expectEqual(expected_start, header_view.upper());
+        try std.testing.expectEqual(expected_start, header_view.special());
         for (bytes[HeaderLayout.size..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     }
 }
@@ -535,7 +345,7 @@ test "markSlotUnused clears only the requested line pointer" {
     try std.testing.expectEqual(ItemId.State.unused, cleared.state);
     try std.testing.expectEqual(@as(u15, 0), cleared.offset);
     try std.testing.expectEqual(@as(u15, 0), cleared.length);
-    try std.testing.expectEqual(@as(usize, 2), page.header().slotCount());
+    try std.testing.expectEqual(@as(usize, 2), page.page_header().slotCount());
     const view = page.prepare(42).view();
     try std.testing.expectEqualStrings("second", try view.getItem(second));
 }
@@ -560,7 +370,7 @@ test "addItem inserts aligned items and line pointers" {
     var page: MutablePage = .{ .bytes = &bytes };
     try std.testing.expectEqual(@as(u16, 1), try page.addItem("hello"));
     try std.testing.expectEqual(@as(u16, 2), try page.addItem("abc"));
-    const header_view = HeaderView.new(bytes[0..HeaderLayout.size]);
+    const header_view = try HeaderView.init(bytes[0..HeaderLayout.size]);
     try std.testing.expectEqual(@as(u16, HeaderLayout.size + 8), header_view.lower());
     const first_start = options.page_size - 16 - std.mem.alignForward(usize, 5, SPECIAL_ALIGNMENT);
     const second_start = first_start - std.mem.alignForward(usize, 3, SPECIAL_ALIGNMENT);
