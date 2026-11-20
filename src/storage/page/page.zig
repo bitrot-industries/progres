@@ -133,7 +133,7 @@ pub const MutablePage = struct {
     const SlotAction = enum { insert, reuse };
 
     pub fn addItemAtSlot(self: *MutablePage, slot: SlotNumber, item_bytes: []const u8) !SlotNumber {
-        if (slot == 0 or slot > self.page_header().slotCount()) return error.InvalidSlot;
+        if (slot == 0) return error.InvalidSlot;
         const slot_start = HeaderLayout.size + (slot - 1) * ItemId.size;
         try self.addItemAtSlotStart(slot_start, item_bytes, .insert);
         return slot;
