@@ -130,37 +130,80 @@ pub const PageView = struct {
 
 pub const MutablePage = struct {
     bytes: *[options.page_size]u8,
+    const SlotAction = enum { insert, reuse };
 
-    /// Append an item and return its one-based slot. Item bytes must not
+    pub fn addItemAtSlot(self: *MutablePage, slot: SlotNumber, item_bytes: []const u8) !SlotNumber {
+        if (slot == 0 or slot > self.page_header().slotCount()) return error.InvalidSlot;
+        const slot_start = HeaderLayout.size + (slot - 1) * ItemId.size;
+        try self.addItemAtSlotStart(slot_start, item_bytes, .insert);
+        return slot;
+    }
+
+    /// Insert an item and return its one-based slot. Item bytes must not
     /// overlap the page; mutation leaves its stored checksum stale.
     pub fn addItem(
         self: *MutablePage,
         item_bytes: []const u8,
     ) !SlotNumber {
+        const header_view = self.page_header();
+        const lower: usize = header_view.lower();
+
+        var slot_start = lower;
+        const had_hint = header_view.hasFreeLines();
+        if (had_hint) {
+            var pos: usize = HeaderLayout.size;
+            while (pos < lower) : (pos += ItemId.size) {
+                const existing = ItemId.decode(self.bytes[pos..][0..ItemId.size]);
+                if (existing.state == .unused and existing.length == 0) {
+                    slot_start = pos;
+                    break;
+                }
+            }
+        }
+
+        const action: SlotAction = if (slot_start == lower) .insert else .reuse;
+        try self.addItemAtSlotStart(slot_start, item_bytes, action);
+
+        if (had_hint and slot_start == lower) {
+            self.page_header_mut().clearHasFreeLines();
+        }
+
+        const slot = (slot_start - HeaderLayout.size) / ItemId.size + 1;
+        return @intCast(slot);
+    }
+
+    fn addItemAtSlotStart(self: *MutablePage, slot_start: usize, item_bytes: []const u8, action: SlotAction) !void {
         const mutable_header = try MutableHeader.init(self.bytes[0..HeaderLayout.size]);
         const lower: usize = mutable_header.lower();
         const upper: usize = mutable_header.upper();
 
         // The region between the header and lower must contain whole slots.
         if ((lower - HeaderLayout.size) % ItemId.size != 0) return error.InvalidPage;
+
         // A normal line pointer needs data and stores its length in 15 bits.
         if (item_bytes.len == 0 or item_bytes.len > ItemId.max_length) return error.InvalidItem;
+        if (slot_start > lower) return error.InvalidSlot;
+
+        const new_lower = lower + if (action == .insert) @as(usize, ItemId.size) else 0;
 
         const aligned_size = std.mem.alignForward(usize, item_bytes.len, SPECIAL_ALIGNMENT);
-        if (aligned_size > upper or lower + ItemId.size > upper - aligned_size) return error.PageFull;
+        if (aligned_size > upper or new_lower > upper - aligned_size) return error.PageFull;
+
+        if (action == .insert and slot_start < lower) {
+            @memmove(
+                self.bytes[slot_start + ItemId.size .. new_lower],
+                self.bytes[slot_start..lower],
+            );
+        }
 
         const item_start = upper - aligned_size;
-
         @memcpy(self.bytes[item_start..][0..item_bytes.len], item_bytes);
 
         const line_pointer = ItemId.normal(item_start, item_bytes.len);
-        line_pointer.encode(self.bytes[lower..][0..ItemId.size]);
+        line_pointer.encode(self.bytes[slot_start..][0..ItemId.size]);
 
-        mutable_header.setLower(@intCast(lower + ItemId.size));
+        mutable_header.setLower(@intCast(new_lower));
         mutable_header.setUpper(@intCast(item_start));
-
-        const slot_number = (lower - HeaderLayout.size) / ItemId.size + 1;
-        return @intCast(slot_number);
     }
 
     pub fn page_header(self: *MutablePage) HeaderView {
@@ -174,6 +217,7 @@ pub const MutablePage = struct {
         const start = HeaderLayout.size + (slot - 1) * ItemId.size;
         // An unused ItemId has zero offset, state, and length.
         @memset(self.bytes[start..][0..ItemId.size], 0);
+        self.page_header_mut().setHasFreeLines();
     }
 
     pub fn setSpecialSpace(self: *MutablePage, data: []const u8) !void {
@@ -348,6 +392,60 @@ test "markSlotUnused clears only the requested line pointer" {
     try std.testing.expectEqual(@as(usize, 2), page.page_header().slotCount());
     const view = page.prepare(42).view();
     try std.testing.expectEqualStrings("second", try view.getItem(second));
+}
+
+test "insertion reuses earliest unused slot without growing the line pointer array" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    const first = try page.addItem("first");
+    const second = try page.addItem("second");
+    const lower = page.page_header().lower();
+    try page.markSlotUnused(first);
+    try std.testing.expect(page.page_header().hasFreeLines());
+    try std.testing.expectEqual(first, try page.addItem("third"));
+    try std.testing.expectEqual(lower, page.page_header().lower());
+    const view = page.prepare(42).view();
+    try std.testing.expectEqualStrings("third", try view.getItem(first));
+    try std.testing.expectEqualStrings("second", try view.getItem(second));
+}
+
+test "stale free-line hint is cleared when insertion appends" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    _ = try page.addItem("first");
+    page.page_header_mut().setHasFreeLines();
+    try std.testing.expectEqual(@as(SlotNumber, 2), try page.addItem("second"));
+    try std.testing.expect(!page.page_header().hasFreeLines());
+}
+
+test "selected slot insertion shifts pointers and appends" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    _ = try page.addItem("a");
+    _ = try page.addItem("b");
+    _ = try page.addItem("c");
+    const lower = page.page_header().lower();
+    try std.testing.expectEqual(@as(SlotNumber, 2), try page.addItemAtSlot(2, "x"));
+    try std.testing.expectEqual(@as(usize, lower + ItemId.size), page.page_header().lower());
+    try std.testing.expectEqual(@as(SlotNumber, 1), try page.addItemAtSlot(1, "first"));
+    try std.testing.expectEqual(@as(SlotNumber, 6), try page.addItemAtSlot(6, "last"));
+    const view = page.prepare(42).view();
+    for ([_][]const u8{ "first", "a", "x", "b", "c", "last" }, 1..) |expected, slot| {
+        try std.testing.expectEqualStrings(expected, try view.getItem(@intCast(slot)));
+    }
+}
+
+test "selected slot insertion failure leaves page unchanged" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    _ = try page.addItem("a");
+    const before = bytes;
+    try std.testing.expectError(error.InvalidSlot, page.addItemAtSlot(0, "x"));
+    try std.testing.expectError(error.InvalidSlot, page.addItemAtSlot(3, "x"));
+    try std.testing.expectError(error.InvalidItem, page.addItemAtSlot(1, ""));
+    var large: [@min(options.page_size, ItemId.max_length)]u8 = @splat(1);
+    try std.testing.expectError(error.PageFull, page.addItemAtSlot(1, &large));
+    try std.testing.expectEqualSlices(u8, &before, &bytes);
 }
 
 test "checksummed page detects corruption and incorrect block number" {

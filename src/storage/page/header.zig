@@ -141,6 +141,18 @@ fn HeaderAccess(comptime isMut: bool) type {
             std.mem.writeInt(u16, self.bytes[HeaderLayout.flags_offset..][0..@sizeOf(u16)], value, .little);
         }
 
+        /// Mark the page as potentially having a reusable line pointer.
+        pub fn setHasFreeLines(self: MutableHeader) void {
+            if (!isMut) @compileError("method not available");
+            self.setFlags(self.flags() | HeaderLayout.has_free_lines);
+        }
+
+        /// Clear the reusable-line-pointer hint without changing other flags.
+        pub fn clearHasFreeLines(self: MutableHeader) void {
+            if (!isMut) @compileError("method not available");
+            self.setFlags(self.flags() & ~HeaderLayout.has_free_lines);
+        }
+
         /// Set the end of the line-pointer array; caller maintains page invariants.
         pub fn setLower(self: MutableHeader, value: LocationIndex) void {
             if (!isMut) @compileError("method not available");
@@ -242,4 +254,18 @@ test "validated read-only and mutable headers share data" {
     try std.testing.expect(view.hasFreeLines());
     try std.testing.expectEqual(@as(usize, options.page_size - HeaderLayout.size), view.exactFreeSpace());
     try std.testing.expect(@TypeOf(view.bytes) == *const [HeaderLayout.size]u8);
+}
+
+test "free-line hint preserves other page flags" {
+    var bytes = test_helpers.validHeaderBytes();
+    const header = try MutableHeader.init(&bytes);
+    const other_flags: u16 = 0x0006;
+    header.setFlags(other_flags);
+    try std.testing.expect(!header.hasFreeLines());
+    header.setHasFreeLines();
+    try std.testing.expect(header.hasFreeLines());
+    try std.testing.expectEqual(other_flags | HeaderLayout.has_free_lines, header.flags());
+    header.clearHasFreeLines();
+    try std.testing.expect(!header.hasFreeLines());
+    try std.testing.expectEqual(other_flags, header.flags());
 }
