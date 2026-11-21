@@ -132,11 +132,27 @@ pub const MutablePage = struct {
     bytes: *[options.page_size]u8,
     const SlotAction = enum { insert, reuse };
 
-    pub fn addItemAtSlot(self: *MutablePage, slot: SlotNumber, item_bytes: []const u8) !SlotNumber {
+    pub fn addItemAtSlot(self: *MutablePage, slot: SlotNumber, item_bytes: []const u8) !void {
         if (slot == 0) return error.InvalidSlot;
         const slot_start = HeaderLayout.size + (slot - 1) * ItemId.size;
         try self.addItemAtSlotStart(slot_start, item_bytes, .insert);
-        return slot;
+    }
+
+    pub fn reuseItemAtSlot(self: *MutablePage, slot: SlotNumber, item_bytes: []const u8) !void {
+        if (slot == 0) return error.InvalidSlot;
+        const header_view = self.page_header();
+        if (slot > header_view.slotCount()) {
+            return error.InvalidSlot;
+        }
+
+        const slot_start = HeaderLayout.size + (slot - 1) * ItemId.size;
+        if (slot_start > header_view.lower()) return error.InvalidSlot;
+
+        const existing = ItemId.decode(self.bytes[slot_start..][0..ItemId.size]);
+        if (!existing.isReusable()) {
+            return error.InvalidSlot;
+        }
+        try self.addItemAtSlotStart(slot_start, item_bytes, .reuse);
     }
 
     /// Insert an item and return its one-based slot. Item bytes must not
@@ -418,6 +434,27 @@ test "stale free-line hint is cleared when insertion appends" {
     try std.testing.expect(!page.page_header().hasFreeLines());
 }
 
+test "selected slot reuse preserves other items and rejects unavailable slots" {
+    var bytes: [options.page_size]u8 = @splat(0);
+    var page = EmptyPage.new(&bytes).mutable();
+    const first = try page.addItem("first");
+    const second = try page.addItem("second");
+    try page.markSlotUnused(first);
+    const lower = page.page_header().lower();
+
+    const before = bytes;
+    try std.testing.expectError(error.InvalidSlot, page.reuseItemAtSlot(0, "new"));
+    try std.testing.expectError(error.InvalidSlot, page.reuseItemAtSlot(second + 1, "new"));
+    try std.testing.expectError(error.InvalidSlot, page.reuseItemAtSlot(second, "new"));
+    try std.testing.expectEqualSlices(u8, &before, &bytes);
+
+    try page.reuseItemAtSlot(first, "new");
+    try std.testing.expectEqual(lower, page.page_header().lower());
+    const view = page.prepare(42).view();
+    try std.testing.expectEqualStrings("new", try view.getItem(first));
+    try std.testing.expectEqualStrings("second", try view.getItem(second));
+}
+
 test "selected slot insertion shifts pointers and appends" {
     var bytes: [options.page_size]u8 = @splat(0);
     var page = EmptyPage.new(&bytes).mutable();
@@ -425,10 +462,10 @@ test "selected slot insertion shifts pointers and appends" {
     _ = try page.addItem("b");
     _ = try page.addItem("c");
     const lower = page.page_header().lower();
-    try std.testing.expectEqual(@as(SlotNumber, 2), try page.addItemAtSlot(2, "x"));
+    try page.addItemAtSlot(2, "x");
     try std.testing.expectEqual(@as(usize, lower + ItemId.size), page.page_header().lower());
-    try std.testing.expectEqual(@as(SlotNumber, 1), try page.addItemAtSlot(1, "first"));
-    try std.testing.expectEqual(@as(SlotNumber, 6), try page.addItemAtSlot(6, "last"));
+    try page.addItemAtSlot(1, "first");
+    try page.addItemAtSlot(6, "last");
     const view = page.prepare(42).view();
     for ([_][]const u8{ "first", "a", "x", "b", "c", "last" }, 1..) |expected, slot| {
         try std.testing.expectEqualStrings(expected, try view.getItem(@intCast(slot)));
