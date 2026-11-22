@@ -12,10 +12,26 @@ pub fn build(b: *std.Build) void {
     });
     page.addOptions("options", options);
 
-    const page_tests = b.addTest(.{ .root_module = page });
-    const run_page_tests = b.addRunArtifact(page_tests);
+    const heap = b.addModule("heap", .{
+        .root_source_file = b.path("src/storage/heap/heap.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    heap.addImport("page", page);
+    heap.addOptions("options", options);
+
     const test_step = b.step("test", "Run page module tests");
-    test_step.dependOn(&run_page_tests.step);
+
+    initialize_tests(b, test_step, &.{ page, heap });
+}
+
+fn initialize_tests(b: *std.Build, test_step: *std.Build.Step, modules: []const *std.Build.Module) void {
+    for (modules) |module| {
+        const module_tests = b.addTest(.{ .root_module = module });
+        const run_tests = b.addRunArtifact(module_tests);
+
+        test_step.dependOn(&run_tests.step);
+    }
 }
 
 fn get_options(b: *std.Build) *std.Build.Step.Options {
