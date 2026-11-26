@@ -73,7 +73,7 @@ pub const Header = struct {
         }
 
         // todo: you can work on a single byte instead
-        const mask = header.infoMask(); // ("alice", NULL, "address somethiong Dubai", 23)
+        const mask = header.infoMask();
         if (mask.has_null) {
             const count: usize = header.infoMask2().attribute_count;
             const bitmap_size_in_bytes = (count + bits_per_byte - 1) / bits_per_byte;
