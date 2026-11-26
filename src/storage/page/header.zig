@@ -5,7 +5,7 @@ const item = @import("item.zig");
 const ItemId = item.ItemId;
 
 const page = @import("page.zig");
-const SPECIAL_ALIGNMENT = page.SPECIAL_ALIGNMENT;
+const special_alignment = page.special_alignment;
 
 pub const LocationIndex = u16;
 pub const TransactionId = u32;
@@ -26,20 +26,20 @@ pub const HeaderLayout = struct {
 pub const MutableHeader = HeaderAccess(true);
 pub const HeaderView = HeaderAccess(false);
 
-fn HeaderAccess(comptime isMut: bool) type {
+fn HeaderAccess(comptime is_mut: bool) type {
     return struct {
         const Self = @This();
 
         const valid_flag_bits: u16 = 0x0007;
-        bytes: if (isMut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8,
+        bytes: if (is_mut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8,
 
-        pub fn init(bytes: if (isMut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8) !Self {
+        pub fn init(bytes: if (is_mut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8) !Self {
             const self = Self{ .bytes = bytes };
             try self.validate();
             return self;
         }
 
-        pub fn unchecked(bytes: if (isMut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8) Self {
+        pub fn unchecked(bytes: if (is_mut) *[HeaderLayout.size]u8 else *const [HeaderLayout.size]u8) Self {
             return .{ .bytes = bytes };
         }
 
@@ -55,7 +55,7 @@ fn HeaderAccess(comptime isMut: bool) type {
                 self.upper() > self.special() or
                 // Special space must start within the page, on its required boundary.
                 self.special() > options.page_size or
-                self.special() % SPECIAL_ALIGNMENT != 0) return error.InvalidHeader;
+                self.special() % special_alignment != 0) return error.InvalidHeader;
         }
 
         pub fn slotCount(self: Self) usize {
@@ -69,9 +69,9 @@ fn HeaderAccess(comptime isMut: bool) type {
         }
 
         pub fn freeSpace(self: Self) usize {
-            const exactSpace = self.exactFreeSpace();
-            if (exactSpace < ItemId.size) return 0;
-            return exactSpace - ItemId.size;
+            const exact_space = self.exactFreeSpace();
+            if (exact_space < ItemId.size) return 0;
+            return exact_space - ItemId.size;
         }
 
         pub fn freeSpaceForMultipleItems(self: Self, n: usize) usize {
@@ -131,50 +131,50 @@ fn HeaderAccess(comptime isMut: bool) type {
         //? Mutable methods
         /// Store the checksum calculated for this page.
         pub fn setChecksum(self: MutableHeader, value: u16) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.mem.writeInt(u16, self.bytes[HeaderLayout.checksum_offset..][0..@sizeOf(u16)], value, .little);
         }
 
         /// Set page-state flags; callers must preserve valid flag bits.
         pub fn setFlags(self: MutableHeader, value: u16) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.mem.writeInt(u16, self.bytes[HeaderLayout.flags_offset..][0..@sizeOf(u16)], value, .little);
         }
 
         /// Mark the page as potentially having a reusable line pointer.
         pub fn setHasFreeLines(self: MutableHeader) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             self.setFlags(self.flags() | HeaderLayout.has_free_lines);
         }
 
         /// Clear the reusable-line-pointer hint without changing other flags.
         pub fn clearHasFreeLines(self: MutableHeader) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             self.setFlags(self.flags() & ~HeaderLayout.has_free_lines);
         }
 
         /// Set the end of the line-pointer array; caller maintains page invariants.
         pub fn setLower(self: MutableHeader, value: LocationIndex) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.mem.writeInt(u16, self.bytes[HeaderLayout.lower_offset..][0..@sizeOf(u16)], value, .little);
         }
 
         /// Set the beginning of item storage; caller maintains page invariants.
         pub fn setUpper(self: MutableHeader, value: LocationIndex) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.mem.writeInt(u16, self.bytes[HeaderLayout.upper_offset..][0..@sizeOf(u16)], value, .little);
         }
 
         /// Set the beginning of the access method's reserved special space.
         pub fn setSpecial(self: MutableHeader, value: LocationIndex) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.mem.writeInt(u16, self.bytes[HeaderLayout.special_offset..][0..@sizeOf(u16)], value, .little);
         }
 
         /// Store the page size and layout version in their shared header field.
         /// The page size must be a multiple of 256, leaving its low byte free.
         pub fn setPageSizeVersion(self: MutableHeader, size: u16, version: u8) void {
-            if (!isMut) @compileError("method not available");
+            if (!is_mut) @compileError("method not available");
             std.debug.assert(size & HeaderLayout.layout_version_mask == 0);
             std.mem.writeInt(u16, self.bytes[HeaderLayout.page_size_version_offset..][0..@sizeOf(u16)], size | @as(u16, version), .little);
         }

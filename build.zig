@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const options = get_options(b);
+    const options = buildOptions(b);
 
     const page = b.addModule("page", .{
         .root_source_file = b.path("src/storage/page/page.zig"),
@@ -22,10 +22,10 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run page module tests");
 
-    initialize_tests(b, test_step, &.{ page, heap });
+    initializeTests(b, test_step, &.{ page, heap });
 }
 
-fn initialize_tests(b: *std.Build, test_step: *std.Build.Step, modules: []const *std.Build.Module) void {
+fn initializeTests(b: *std.Build, test_step: *std.Build.Step, modules: []const *std.Build.Module) void {
     for (modules) |module| {
         const module_tests = b.addTest(.{ .root_module = module });
         const run_tests = b.addRunArtifact(module_tests);
@@ -34,7 +34,7 @@ fn initialize_tests(b: *std.Build, test_step: *std.Build.Step, modules: []const 
     }
 }
 
-fn get_options(b: *std.Build) *std.Build.Step.Options {
+fn buildOptions(b: *std.Build) *std.Build.Step.Options {
     const input = b.option(
         []const u8,
         "page-size",

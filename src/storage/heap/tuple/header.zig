@@ -68,7 +68,7 @@ pub const Header = struct {
             return error.InvalidDataOffset;
         }
 
-        if (data_offset % page.SPECIAL_ALIGNMENT != 0) {
+        if (data_offset % page.special_alignment != 0) {
             return error.InvalidAlignment;
         }
 
@@ -179,12 +179,12 @@ test "header rejects invalid data offsets and alignment" {
     bytes[Header.Layout.attribute_data_offset] = Header.Layout.size - 1;
     try std.testing.expectError(error.InvalidDataOffset, Header.init(&bytes, 64));
 
-    const aligned = std.mem.alignForward(usize, Header.Layout.size, page.SPECIAL_ALIGNMENT);
+    const aligned = std.mem.alignForward(usize, Header.Layout.size, page.special_alignment);
     bytes[Header.Layout.attribute_data_offset] = @intCast(aligned);
     try std.testing.expectError(error.InvalidDataOffset, Header.init(&bytes, aligned - 1));
     _ = try Header.init(&bytes, aligned);
 
-    if (page.SPECIAL_ALIGNMENT > 1) {
+    if (page.special_alignment > 1) {
         bytes[Header.Layout.attribute_data_offset] = @intCast(aligned + 1);
         try std.testing.expectError(error.InvalidAlignment, Header.init(&bytes, aligned + 1));
     }
@@ -192,7 +192,7 @@ test "header rejects invalid data offsets and alignment" {
 
 test "header checks null bitmap space only when null flag is set" {
     var bytes: [Header.Layout.size]u8 = @splat(0);
-    const offset = std.mem.alignForward(usize, Header.Layout.size, page.SPECIAL_ALIGNMENT);
+    const offset = std.mem.alignForward(usize, Header.Layout.size, page.special_alignment);
     bytes[Header.Layout.attribute_data_offset] = @intCast(offset);
     // 255 attributes need 32 bitmap bytes, more than the available padding.
     bytes[Header.Layout.infomask2_offset] = 0xff;
