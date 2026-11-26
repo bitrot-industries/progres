@@ -1,7 +1,7 @@
 const std = @import("std");
 const page = @import("page");
 
-const bits_per_byte = 8;
+pub const bits_per_byte = 8;
 
 pub const Header = struct {
     pub const Layout = struct {
