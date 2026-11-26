@@ -1,4 +1,4 @@
-//! Line-pointer representation. See PostgreSQL's storage/itemid.h.
+//! Line-pointer representation.
 const std = @import("std");
 
 /// A line pointer locates an item within one page and records its state.

@@ -1,4 +1,4 @@
-//! PostgreSQL page storage subsystem.
+//! Page storage subsystem.
 
 const std = @import("std");
 const options = @import("options");
@@ -14,7 +14,7 @@ const HeaderLayout = header.HeaderLayout;
 const HeaderView = header.HeaderView;
 const MutableHeader = header.MutableHeader;
 
-// PostgreSQL's MAXIMUM_ALIGNOF is the larger target alignment of int64_t and double.
+// Use the larger target alignment of 64-bit integers and floats.
 pub const SPECIAL_ALIGNMENT: usize = @max(@alignOf(i64), @alignOf(f64));
 const ItemId = item.ItemId;
 

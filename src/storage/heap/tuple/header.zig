@@ -103,7 +103,7 @@ pub const Header = struct {
     pub fn tupleId(self: Header) TupleId {
         const offset = Layout.tuple_id_offset;
 
-        // PostgreSQL stores the block number as high and low u16 parts.
+        // The block number is stored as high and low u16 parts.
         const high = self.readU16(offset);
         const low = self.readU16(offset + @sizeOf(u16));
         const slot = self.readU16(offset + 2 * @sizeOf(u16));

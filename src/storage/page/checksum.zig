@@ -1,4 +1,4 @@
-//! PostgreSQL page checksum calculation and integration.
+//! Page checksum calculation and integration.
 
 const std = @import("std");
 const options = @import("options");
@@ -14,10 +14,9 @@ const initial = [32]u32{
     0x9FBF8C76, 0x15CA20BE, 0xF2CA9FD3, 0x959BD756,
 };
 
-/// Calculate PostgreSQL's page checksum without modifying the input page.
+/// Calculate the page checksum without modifying the input page.
 /// The checksum field itself is treated as zero, and block_number is
-/// relative to the relation fork. Word decoding follows the host byte order,
-/// as in PostgreSQL's checksum implementation.
+/// relative to the relation fork. Word decoding follows the host byte order.
 pub fn calculate(bytes: *const [options.page_size]u8, block_number: u32) u16 {
     var sums = initial;
     for (0..options.page_size / 128) |row| {
