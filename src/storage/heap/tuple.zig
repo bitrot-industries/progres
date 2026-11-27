@@ -32,7 +32,57 @@ pub const TupleView = struct {
         // 0 means NULL - 1 means nonNull
         return self.bytes[Header.Layout.size + byte_index] & @as(u8, 1) << bit_index == 0;
     }
+
+    pub fn attributeData(self: TupleView) []const u8 {
+        const data_start_offset = self.header().dataOffset();
+        return self.bytes[data_start_offset..self.bytes.len];
+    }
 };
+
+test "attribute data is returned correctly" {
+    var bytes: [64]u8 = @splat(0);
+    const word = "progres";
+    @memcpy(bytes[64 - word.len ..], word);
+
+    const data_offset = std.mem.alignForward(
+        usize,
+        Header.Layout.size,
+        page.special_alignment,
+    );
+
+    bytes[Header.Layout.attribute_data_offset] = @intCast(data_offset);
+
+    const tuple = try TupleView.from(&bytes);
+
+    // next closest alignment without (huge) bitmap is 24
+    try std.testing.expectEqual(24, data_offset);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        bytes[data_offset..bytes.len],
+        tuple.attributeData(),
+    );
+}
+
+test "attributeData returns empty slice when there is no data" {
+    const data_offset = comptime std.mem.alignForward(
+        usize,
+        Header.Layout.size,
+        page.special_alignment,
+    );
+
+    // there is no space for the attribute data
+    var bytes: [data_offset]u8 = @splat(0);
+
+    bytes[Header.Layout.attribute_data_offset] = @intCast(data_offset);
+
+    const tuple = try TupleView.from(&bytes);
+
+    try std.testing.expectEqual(
+        0,
+        tuple.attributeData().len,
+    );
+}
 
 test "isNull reads the tuple's null bitmap" {
     var bytes: [64]u8 = @splat(0);
